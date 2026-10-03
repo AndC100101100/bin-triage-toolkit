@@ -55,8 +55,14 @@ DANGEROUS_FUNCS: Dict[str, Dict[str, Any]] = {
     "printf":    {"primitive": "format string (maybe)", "weight": 8,  "note": "flag if format arg is user-controlled"},
     "fprintf":   {"primitive": "format string (maybe)", "weight": 6,  "note": "flag if format arg is user-controlled"},
     "snprintf":  {"primitive": "format string (maybe)", "weight": 5,  "note": "flag if format arg is user-controlled"},
+    "vsnprintf": {"primitive": "format string (maybe)", "weight": 5,  "note": "flag if format arg is user-controlled"},
+    "vfprintf":  {"primitive": "format string (maybe)", "weight": 5,  "note": "flag if format arg is user-controlled"},
     "syslog":    {"primitive": "format string (maybe)", "weight": 5,  "note": "flag if format arg is user-controlled"},
 }
+
+# Heap allocator functions — presence (esp. free + alloc) means UAF/double-free/
+# heap-overflow surface. Ubiquitous, so informational + a small score bump only.
+HEAP_FUNCS = {"malloc", "calloc", "realloc", "free", "strdup", "strndup"}
 
 # Symbol names that smell like intentional win/backdoor functions (CTF staple)
 WIN_SYMBOL_RE = re.compile(
@@ -102,16 +108,19 @@ class PwnTriage(BaseAnalyzer):
         warnings: List[str] = []
         mitigations = self._checksec(file_path, warnings)
         symbols = self._symbols(file_path, file_data, warnings)
-        dangerous = self._map_dangerous(symbols["imports"] | symbols["defined"])
+        all_names = symbols["imports"] | symbols["defined"]
+        dangerous = self._map_dangerous(all_names)
+        heap_funcs, heap_risky = self._heap_surface(all_names)
         win_syms = sorted(s for s in symbols["defined"] if WIN_SYMBOL_RE.search(s))
         strings = self._pwn_strings(file_data)
 
-        score, drivers = self._score(mitigations, dangerous, win_syms, strings)
+        score, drivers = self._score(mitigations, dangerous, win_syms, strings, heap_risky)
         verdict = self._verdict(score)
 
         results = {
             "mitigations": mitigations,
             "dangerous_functions": dangerous,
+            "heap_functions": heap_funcs,
             "win_symbols": win_syms,
             "interesting_strings": strings,
             "exploitability": {
@@ -119,6 +128,7 @@ class PwnTriage(BaseAnalyzer):
                 "verdict": verdict,
                 "drivers": drivers,
                 "summary": self._summary(mitigations, dangerous, win_syms, strings, verdict),
+                "caveat": self.CAVEAT,
             },
             "engine": "pwntools" if PWNTOOLS_AVAILABLE else "fallback",
         }
@@ -193,13 +203,38 @@ class PwnTriage(BaseAnalyzer):
                 continue
         return {"imports": imports, "defined": defined}
 
+    @staticmethod
+    def _normalize(name: str):
+        """Strip FORTIFY/isoc99 wrappers: __sprintf_chk->sprintf, __isoc99_scanf->scanf."""
+        base = name.split("@")[0]
+        fortified = False
+        if base.startswith("__isoc99_"):
+            base = base[len("__isoc99_"):]
+        if base.startswith("__") and base.endswith("_chk"):
+            base, fortified = base[2:-4], True
+        return base, fortified
+
     def _map_dangerous(self, names: Set[str]) -> List[Dict[str, Any]]:
-        found = []
+        found, seen = [], set()
         for name in sorted(names):
-            key = name.split("@")[0]
-            if key in DANGEROUS_FUNCS:
-                found.append({"function": key, **DANGEROUS_FUNCS[key]})
+            base, fortified = self._normalize(name)
+            if base not in DANGEROUS_FUNCS or base in seen:
+                continue
+            seen.add(base)
+            entry = {"function": base, **DANGEROUS_FUNCS[base]}
+            if fortified:
+                # FORTIFY blocks the easy cases (e.g. %n in writable mem); still worth a look.
+                entry["weight"] = max(2, entry["weight"] // 2)
+                entry["note"] += " (FORTIFY-wrapped; review size/fmt args)"
+                entry["fortified"] = True
+            found.append(entry)
         return found
+
+    @staticmethod
+    def _heap_surface(names: Set[str]):
+        present = sorted(n.split("@")[0] for n in names if n.split("@")[0] in HEAP_FUNCS)
+        risky = "free" in present and any(a in present for a in ("malloc", "calloc", "realloc"))
+        return present, risky
 
     def _pwn_strings(self, data: bytes) -> Dict[str, List[str]]:
         out: Dict[str, List[str]] = {}
@@ -217,7 +252,7 @@ class PwnTriage(BaseAnalyzer):
         return out
 
     # ----- scoring -----
-    def _score(self, mit, dangerous, win_syms, strings):
+    def _score(self, mit, dangerous, win_syms, strings, heap_risky=False):
         score = 0
         drivers: List[str] = []
 
@@ -242,20 +277,30 @@ class PwnTriage(BaseAnalyzer):
             add(d["weight"], f"imports {d['function']} -> {d['primitive']}")
         if win_syms:
             add(20, f"win/backdoor symbol(s): {', '.join(win_syms[:3])}")
+        if heap_risky:
+            add(8, "heap allocator in use (review UAF / double-free / heap overflow)")
         if strings.get("shell"):
             add(8, "/bin/sh string present")
 
         return min(score, 100), drivers
 
+    # A score is an attack-SURFACE indicator, not a verdict. Static import/mitigation
+    # analysis cannot see logic, UAF, or crypto bugs — exactly the ones A&D hosts favor
+    # (see the A&D toolkit's corpus notes). A low score never means "safe".
+    CAVEAT = ("static attack-surface only — a LOW/MINIMAL score does NOT mean safe; "
+              "logic/UAF/crypto bugs are invisible here. If you have the source, triage it "
+              "with Opengrep first; use this for stripped/no-source binaries + checksec/diff.")
+
     @staticmethod
     def _verdict(score: int) -> str:
+        """Attack-surface band, not an exploitability guarantee."""
         if score >= 60:
             return "HIGH"
         if score >= 30:
             return "MEDIUM"
         if score > 0:
             return "LOW"
-        return "HARDENED"
+        return "MINIMAL"
 
     @staticmethod
     def _summary(mit, dangerous, win_syms, strings, verdict) -> str:

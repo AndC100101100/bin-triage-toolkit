@@ -530,7 +530,7 @@ def triage(targets, recursive, emit_exploit, output, profile, config):
 
     rows.sort(key=lambda x: x[2], reverse=True)
 
-    table = Table(title="[bold]Exploitability Triage (ranked)[/bold]")
+    table = Table(title="[bold]Attack-Surface Triage (ranked)[/bold]")
     for col in ("Binary", "Score", "Verdict", "Arch", "NX", "PIE", "Canary", "RELRO", "Danger", "Win"):
         table.add_column(col)
     verdict_color = {"HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan", "HARDENED": "green"}
@@ -550,7 +550,12 @@ def triage(targets, recursive, emit_exploit, output, profile, config):
             ",".join(r.get("win_symbols", []))[:24] or "-",
         )
     console.print(table)
-    console.print("\n[dim]High-scoring binaries first. Hand off to Ghidra/pwntools; see A&D toolkit 03/05.[/dim]")
+    console.print(
+        "\n[yellow]⚠ Static attack-surface only — a LOW/MINIMAL score does NOT mean safe[/yellow] "
+        "(logic/UAF/crypto bugs are invisible here).")
+    console.print(
+        "[dim]Have the source? Triage it with Opengrep first — this is the no-source/stripped "
+        "fallback (+ checksec/diff). Hand off to Ghidra/pwntools; see A&D toolkit 03/05.[/dim]")
 
 
 @cli.command()

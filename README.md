@@ -7,9 +7,16 @@ ECSC/FAUST — and malware/forensic analysis.
 > ## ⚡ Attack & Defense (ECSC / FAUST) — start here
 >
 > In A&D the vulnerable services are usually **Linux ELF binaries** (C/C++/Rust). The `triage`
-> command answers quickly *"which binary do I pop first, and how?"*: exploit mitigations
-> (checksec), dangerous functions → exploitation primitives, win/backdoor symbols, and a
-> **ranked exploitability score**. Then you hand off to Ghidra/pwntools.
+> command gives a fast first pass over *all* the service binaries at once: exploit mitigations
+> (checksec), dangerous functions → exploitation primitives, heap/win-symbol surface, and a
+> **ranked attack-surface score** (a triage aid for *where to look first* — **not** a verdict).
+> Then you hand off to Ghidra/pwntools.
+>
+> **Scope, honestly:** this is static analysis of the *binary*. It cannot see logic, use-after-free,
+> or crypto bugs — exactly the kinds A&D hosts like to plant — so **a LOW/MINIMAL score never means
+> "safe"**. In A&D you usually *have* the source (it's on your vulnbox), so **triage the source with
+> Opengrep first**; reach for this tool for **stripped / no-source binaries**, and for `checksec` +
+> `diff` on any binary.
 >
 > ```bash
 > pip install -e ".[ad]"                      # pwntools + capstone engine (no AI)
@@ -219,6 +226,16 @@ binary-triage analyze evidence.bin --format markdown --output investigation.md
 | Simple CLI         | ✅                    | ❌     | ✅     |
 | JSON/automation    | ✅                    | ✅     | ❌     |
 
+## ⚠️ Limitations (and what's deliberately out of scope for now)
+
+- **Static, binary-only.** No data-flow — it reports that a risky function/surface *exists*, not
+  that user input *reaches* it. The score is a triage aid, not an exploitability proof.
+- **C/libc-centric catalog.** Dangerous-function mapping targets the C/libc idiom (incl. FORTIFY
+  `_chk` and `__isoc99_` variants). **Rust/Go binaries** (different panic/alloc/idioms) are not yet
+  modelled — planned as a follow-up, per-binary-type.
+- **Source beats this when you have it.** Opengrep on source is the primary code-review lane;
+  binary triage is the no-source/stripped fallback plus checksec/diff.
+
 ## 📝 Roadmap
 
 - [x] Project base structure
@@ -232,6 +249,8 @@ binary-triage analyze evidence.bin --format markdown --output investigation.md
 - [x] CLI (`analyze`, `batch`, `triage`, `diff`)
 - [ ] HTML report generator
 - [ ] `--from-container` (pull a binary off a running vulnbox)
+- [ ] Per-binary-type depth: Rust / Go idioms, static-vs-dynamic nuances
+- [ ] Optional data-flow (angr/decompiler) to confirm reachability of a sink
 - [ ] REST API / Docker / CI
 
 ## 🤝 Contributing
