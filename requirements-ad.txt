@@ -1,0 +1,25 @@
+# Minimal, OFFLINE Attack & Defense dependency set.
+# Install during prep and cache wheels; no AI/ML libraries here (competition rule).
+#
+#   pip download -r requirements-ad.txt -d wheels/     # during prep (online)
+#   pip install --no-index --find-links wheels/ -r requirements-ad.txt   # on the day
+
+# Core CLI / output
+pyyaml>=6.0
+click>=8.1.0
+rich>=13.0.0
+
+# Binary RE / pwn engine (also our day-of exploit library)
+pwntools>=4.11.0
+capstone>=5.0.0
+
+# External tools (install via system/pipx, not pip) — document, don't import:
+#   checksec           (apt install checksec)         mitigations
+#   binutils           (readelf, objdump, nm)          symbols/sections
+#   ROPgadget / ropper                                  gadgets
+#   one_gadget          (gem install one_gadget)        magic libc gadgets
+#   pwninit                                             libc/loader setup
+#   ghidra / radare2                                    manual RE
+#
+# NOTE: deliberately excluded for A&D (malware-oriented / ML):
+#   magika (AI), flare-capa, yara-python, pefile, oletools

@@ -1,0 +1,43 @@
+# Binary Triage Toolkit — Attack & Defense profile
+# Use during ECSC/FAUST A&D: ELF-first, OFFLINE, and NO AI at runtime
+# (the competition prohibits AI tools during play — Magika is an ML model, so
+# it is disabled here and file typing falls back to libmagic / magic bytes).
+#   binary-triage triage <service-dir-or-binary> --profile ad
+
+# File identification — NO AI (Magika off); libmagic only.
+file_identifier:
+  enabled: true
+  use_magic: true
+  use_magika: false        # <-- ML model; OFF for competition compliance
+  mime: true
+
+# Pwn triage (the A&D core): mitigations + dangerous funcs + exploitability.
+pwn_triage:
+  enabled: true
+  checksec_path: "checksec"
+  max_strings: 40
+
+# Strings: pwn framing (flag paths, /bin/sh, format specifiers); malware IOCs off.
+string_extractor:
+  enabled: true
+  min_length: 4
+  extract_iocs: false       # C2/URL framing = malware noise for service binaries
+  extract_ad: true
+
+# ELF structural detail (uses GNU readelf if llvm-readelf is absent).
+elf_analyzer:
+  enabled: true
+
+# Malware-oriented modules are off by default in A&D (re-enable if ever needed).
+yara_scanner:
+  enabled: false
+capa_analyzer:
+  enabled: false
+pe_analyzer:
+  enabled: false
+
+logging:
+  level: "WARNING"
+
+output:
+  default_format: "table"

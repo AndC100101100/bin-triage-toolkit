@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Triage build / verification artifacts
+tests/vuln_weak
+tests/vuln_hard
+tests/*_exploit.py
+*_exploit.py
+*_triage.json
+opengrep-out/
+reports/
+wheels/
+
+# Local offline rule/DB caches
+config/yara_rules/compiled.yarc

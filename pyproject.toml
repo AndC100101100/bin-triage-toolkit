@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "binary-triage-toolkit"
+version = "0.2.0"
+description = "Opensource toolkit for automated binary analysis and triage (Attack & Defense / CTF ready)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "AndC100101100"}
+]
+keywords = ["binary-analysis", "ctf", "attack-defense", "pwn", "elf", "security", "triage"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Topic :: Security",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+# Lean core so `triage`/`diff` install cleanly. Heavier/optional engines live in
+# extras below. Nothing here is an AI/ML package (competition rule).
+dependencies = [
+    "pyyaml>=6.0",
+    "click>=8.1.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+# Attack & Defense pwn triage engine (recommended install for ECSC/FAUST).
+ad = [
+    "pwntools>=4.11.0",
+    "capstone>=5.0.0",
+    "python-magic>=0.4.27",
+]
+# Malware-triage modules (YARA families, CAPA/MITRE, PE/Office, AI file-id).
+# NOT used during A&D play (magika is AI); install only for forensic use.
+malware = [
+    "magika>=0.5.0",
+    "flare-capa>=7.0.0",
+    "yara-python>=4.3.0",
+    "pefile>=2023.2.7",
+    "oletools>=0.60.0",
+    "pyexiftool>=0.5.6",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "mypy>=1.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/AndC100101100/bin-triage-toolkit"
+Repository = "https://github.com/AndC100101100/bin-triage-toolkit"
+Issues = "https://github.com/AndC100101100/bin-triage-toolkit/issues"
+
+[project.scripts]
+binary-triage = "binary_triage.main:cli"
+bt = "binary_triage.main:cli"
+
+[tool.setuptools]
+packages = ["binary_triage", "binary_triage.analyzers"]
+package-dir = {"" = "src"}
+
+[tool.black]
+line-length = 120
+target-version = ['py39', 'py310', 'py311']
+include = '\.pyi?$'
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]

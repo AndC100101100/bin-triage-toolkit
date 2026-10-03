@@ -1,0 +1,59 @@
+# Binary Triage Toolkit Configuration
+
+# File Identifier Configuration
+file_identifier:
+  enabled: true
+  use_magic: true
+  use_magika: true
+  mime: true
+
+# YARA Scanner Configuration
+yara_scanner:
+  enabled: true
+  rules_path: "config/yara_rules"
+  compiled_rules: "config/yara_rules/compiled.yarc"
+  timeout: 60
+  fast_mode: false
+
+# CAPA Analyzer Configuration
+capa_analyzer:
+  enabled: true
+  capa_path: "capa"
+  rules_path: null  # Use default CAPA rules
+  timeout: 120
+  verbose: false
+
+# String Extractor Configuration
+string_extractor:
+  enabled: true
+  min_length: 4
+  max_strings: 10000
+  extract_unicode: true
+  extract_iocs: true
+  context_size: 50
+
+# PE Analyzer Configuration
+pe_analyzer:
+  enabled: true
+  use_pefile: true
+  use_die: true
+  die_path: "diec"
+  extract_resources: true
+
+# ELF Analyzer Configuration
+elf_analyzer:
+  enabled: true
+  readelf_path: "llvm-readelf"
+  timeout: 60
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null  # Set to a path to log to file
+
+# Output Configuration
+output:
+  default_format: "table"
+  json_indent: 2
+  markdown_style: "github"
