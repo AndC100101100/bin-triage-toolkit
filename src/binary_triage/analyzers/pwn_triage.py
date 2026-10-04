@@ -27,6 +27,9 @@ try:
     # pwntools is noisy by default; keep it quiet and import lazily-safe.
     from pwn import ELF, context as _pwn_context
     _pwn_context.log_level = "error"
+    # context.log_level alone doesn't always silence the module loggers pwnlib
+    # attaches (e.g. pwnlib.elf.elf DEBUG/WARNING on static binaries), so pin them.
+    logging.getLogger("pwnlib").setLevel(logging.ERROR)
     PWNTOOLS_AVAILABLE = True
 except Exception:  # pragma: no cover - env without pwntools
     PWNTOOLS_AVAILABLE = False
@@ -70,6 +73,16 @@ WIN_SYMBOL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# glibc / loader / libstdc++ / compiler-runtime symbols. These flood the symbol
+# table of statically-linked binaries (the whole libc is inside) and produce
+# false "win/backdoor" hits like `_dl_debug_state`. Filtered out before matching.
+LIBC_NOISE_RE = re.compile(
+    r"^(_dl_|__?libc|__GI_|_IO_|__pthread|_nl_|__gconv|__gnu|__cxa|__gthread|"
+    r"__tunable|__nptl|__vdso|__sysv|__assert|__register|register_tm|frame_dummy|"
+    r"__do_global|__static_initialization|_ZNS|_ZNK|_ZSt|__cxxabi|_ZdlPv|_Znwm|"
+    r"__intel_|__gmon|_init|_fini|_start$|__stack_chk)"
+)
+
 # pwn-relevant strings
 STRING_PATTERNS = {
     "shell": re.compile(rb"/bin/(?:sh|bash|dash)\b"),
@@ -108,16 +121,32 @@ class PwnTriage(BaseAnalyzer):
         warnings: List[str] = []
         mitigations = self._checksec(file_path, warnings)
         symbols = self._symbols(file_path, file_data, warnings)
-        all_names = symbols["imports"] | symbols["defined"]
-        dangerous = self._map_dangerous(all_names)
-        heap_funcs, heap_risky = self._heap_surface(all_names)
-        win_syms = sorted(s for s in symbols["defined"] if WIN_SYMBOL_RE.search(s))
+        static = bool(mitigations.get("static"))
+        role = self._classify_role(file_path, file_data, static)
+
+        # In a DYNAMIC binary, the functions it actually calls are its imports
+        # (PLT / undefined symbols) — reliable. In a STATIC binary there are no
+        # imports; the whole libc is in the symbol table, so a dangerous function
+        # merely being *present* is NOT evidence the program calls it. We therefore
+        # score only confirmed-called functions, and surface static-present ones
+        # separately as low-confidence (disassemble to confirm).
+        call_names = set() if static else symbols["imports"]
+        dangerous = self._map_dangerous(call_names)
+        heap_funcs, heap_risky = self._heap_surface(call_names)
+        static_present = self._map_dangerous(symbols["defined"]) if static else []
+
+        # win/backdoor symbols: only program-defined *functions*, libc/runtime filtered.
+        # (Function-only excludes data objects like glibc's `_r_debug`.)
+        win_candidates = (symbols["functions"] or symbols["defined"])
+        user_funcs = {s for s in win_candidates if not LIBC_NOISE_RE.match(s)}
+        win_syms = sorted(s for s in user_funcs if WIN_SYMBOL_RE.search(s))
         strings = self._pwn_strings(file_data)
 
         score, drivers = self._score(mitigations, dangerous, win_syms, strings, heap_risky)
         verdict = self._verdict(score)
 
         results = {
+            "role": role,
             "mitigations": mitigations,
             "dangerous_functions": dangerous,
             "heap_functions": heap_funcs,
@@ -127,13 +156,46 @@ class PwnTriage(BaseAnalyzer):
                 "score": score,
                 "verdict": verdict,
                 "drivers": drivers,
-                "summary": self._summary(mitigations, dangerous, win_syms, strings, verdict),
+                "summary": self._summary(mitigations, dangerous, win_syms, strings, verdict, role),
                 "caveat": self.CAVEAT,
             },
             "engine": "pwntools" if PWNTOOLS_AVAILABLE else "fallback",
         }
+        if static:
+            results["static_present_functions"] = static_present
+            results["static_note"] = (
+                "statically linked: libc is bundled, so dangerous/heap functions are "
+                "reported as 'present' (unconfirmed), not scored. Disassemble to see which "
+                "are actually called, e.g. `objdump -d <bin> | grep -E 'call|bl '`."
+            )
         status = AnalysisStatus.SUCCESS if mitigations else AnalysisStatus.PARTIAL_SUCCESS
         return self._create_result(status, results=results, warnings=warnings)
+
+    @staticmethod
+    def _classify_role(file_path: Path, file_data: bytes, static: bool = False) -> str:
+        """target executable vs shared library vs relocatable object vs provided solution.
+        Role is read from ELF structure first, filename only as a tiebreak/label."""
+        e_type = int.from_bytes(file_data[16:18], "little") if len(file_data) >= 18 else 0
+        name = file_path.name.lower()
+        if e_type == 1 or name.endswith(".o"):
+            return "relocatable"          # .o — not a standalone program
+        is_lib_name = bool(re.search(r"(^|/)(ld-|libc|libstdc\+\+|libm|libpthread|libdl|libgcc)[-.]", name)) \
+            or name.endswith(".so") or ".so." in name or ".cpython-" in name
+        if e_type == 3:  # ET_DYN — both PIE executables AND shared libraries
+            # Order matters. libc.so.6 has a PT_INTERP too (it's runnable), so a
+            # library *name* wins first. Then an interpreter or static linkage means
+            # a PIE / static-PIE executable. Otherwise a DT_SONAME marks a real
+            # shared library; its absence means a static-PIE executable (e.g. 'solve').
+            if is_lib_name:
+                return "library"
+            if _has_interp(file_path) or static:
+                return "executable"
+            return "library" if _has_soname(file_path) else "executable"
+        if is_lib_name:
+            return "library"
+        if re.search(r"(^|[._-])(solve|exploit|solution|poc|sol)([._-]|$)", name):
+            return "solution?"            # looks like a provided solution, not a challenge
+        return "executable"
 
     # ----- mitigations (checksec) -----
     def _checksec(self, file_path: Path, warnings: List[str]) -> Dict[str, Any]:
@@ -182,26 +244,40 @@ class PwnTriage(BaseAnalyzer):
     def _symbols(self, file_path: Path, file_data: bytes, warnings: List[str]) -> Dict[str, Set[str]]:
         imports: Set[str] = set()
         defined: Set[str] = set()
+        functions: Set[str] = set()
         if PWNTOOLS_AVAILABLE:
             try:
                 e = ELF(str(file_path), checksec=False)
                 imports |= set(getattr(e, "plt", {}) or {})
                 imports |= {n for n, s in (getattr(e, "symbols", {}) or {}).items() if s == 0}
                 defined |= {n for n in (getattr(e, "symbols", {}) or {})}
-                return {"imports": imports, "defined": defined}
+                functions |= {n for n in (getattr(e, "functions", {}) or {})}
+                return {"imports": imports, "defined": defined, "functions": functions}
             except Exception as e:  # pragma: no cover
                 warnings.append(f"pwntools symbol read failed: {e}")
         # nm / objdump fallback
-        for cmd in (["nm", "-D", str(file_path)], ["objdump", "-T", str(file_path)]):
-            try:
-                out = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-                for line in out.stdout.splitlines():
-                    parts = line.split()
-                    if parts:
-                        imports.add(parts[-1])
-            except Exception:
-                continue
-        return {"imports": imports, "defined": defined}
+        try:  # dynamic imports (undefined symbols)
+            out = subprocess.run(["nm", "-D", "-u", str(file_path)],
+                                 capture_output=True, text=True, timeout=20).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if parts:
+                    imports.add(parts[-1])
+        except Exception:
+            pass
+        try:  # defined symbols + functions (T/t = text section = function)
+            out = subprocess.run(["nm", str(file_path)],
+                                 capture_output=True, text=True, timeout=20).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 2:
+                    name, typ = parts[-1], parts[-2]
+                    defined.add(name)
+                    if typ in ("T", "t", "W", "w"):
+                        functions.add(name)
+        except Exception:
+            pass
+        return {"imports": imports, "defined": defined, "functions": functions}
 
     @staticmethod
     def _normalize(name: str):
@@ -303,8 +379,10 @@ class PwnTriage(BaseAnalyzer):
         return "MINIMAL"
 
     @staticmethod
-    def _summary(mit, dangerous, win_syms, strings, verdict) -> str:
+    def _summary(mit, dangerous, win_syms, strings, verdict, role="executable") -> str:
         bits = []
+        if role != "executable":
+            bits.append(f"[{role}]")
         if mit:
             flags = []
             flags.append("NX" if mit.get("nx") else "no-NX")
@@ -331,4 +409,30 @@ def _is_elf(path: Path) -> bool:
         with open(path, "rb") as fh:
             return fh.read(4) == b"\x7fELF"
     except OSError:
+        return False
+
+
+def _has_interp(path: Path) -> bool:
+    """True if the ELF has a PT_INTERP (program interpreter) => a PIE *executable*,
+    not a shared library. Uses pwntools, then readelf, then a conservative default."""
+    if PWNTOOLS_AVAILABLE:
+        try:
+            return bool(getattr(ELF(str(path), checksec=False), "linker", None))
+        except Exception:
+            pass
+    try:
+        out = subprocess.run(["readelf", "-l", str(path)],
+                             capture_output=True, text=True, timeout=15).stdout
+        return "INTERP" in out or "interpreter" in out
+    except Exception:
+        return True  # assume executable rather than mislabel a target as a library
+
+
+def _has_soname(path: Path) -> bool:
+    """True if the ELF declares DT_SONAME (a real shared library, not a static-PIE exe)."""
+    try:
+        out = subprocess.run(["readelf", "-d", str(path)],
+                             capture_output=True, text=True, timeout=15).stdout
+        return "SONAME" in out
+    except Exception:
         return False

@@ -511,12 +511,13 @@ def triage(targets, recursive, emit_exploit, output, profile, config):
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = []
+    targets, references = [], []
     for b in binaries:
         res = analyzer.analyze(b)
         r = res.results
+        role = r.get("role", "executable")
         expl = r.get("exploitability", {})
-        rows.append((b, r, expl.get("score", 0)))
+        (targets if role == "executable" else references).append((b, r, expl.get("score", 0)))
         if out_dir:
             try:
                 str_res = strings.analyze(b).results.get("ad_strings", {})
@@ -524,20 +525,21 @@ def triage(targets, recursive, emit_exploit, output, profile, config):
                 str_res = {}
             payload = {"file": str(b), "pwn_triage": r, "ad_strings": str_res}
             (out_dir / f"{b.name}.json").write_text(json.dumps(payload, indent=2, default=str))
-        if emit_exploit and expl.get("score", 0) > 0:
+        if emit_exploit and role == "executable" and expl.get("score", 0) > 0:
             skel = _emit_exploit_skeleton(b, r)
             console.print(f"[green]exploit skeleton:[/green] {skel}")
 
-    rows.sort(key=lambda x: x[2], reverse=True)
+    targets.sort(key=lambda x: x[2], reverse=True)
 
-    table = Table(title="[bold]Attack-Surface Triage (ranked)[/bold]")
+    table = Table(title="[bold]Attack-Surface Triage (ranked targets)[/bold]")
     for col in ("Binary", "Score", "Verdict", "Arch", "NX", "PIE", "Canary", "RELRO", "Danger", "Win"):
         table.add_column(col)
-    verdict_color = {"HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan", "HARDENED": "green"}
-    for b, r, score in rows:
+    verdict_color = {"HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan", "MINIMAL": "green"}
+    for b, r, score in targets:
         m = r.get("mitigations", {})
         v = r.get("exploitability", {}).get("verdict", "?")
         danger = ",".join(sorted({d["function"] for d in r.get("dangerous_functions", [])})) or "-"
+        note = " [dim](static: funcs unconfirmed)[/dim]" if m.get("static") else ""
         table.add_row(
             b.name, str(score),
             f"[{verdict_color.get(v, 'white')}]{v}[/{verdict_color.get(v, 'white')}]",
@@ -546,10 +548,26 @@ def triage(targets, recursive, emit_exploit, output, profile, config):
             "✓" if m.get("pie") else "[red]✗[/red]",
             "✓" if m.get("canary") else "[red]✗[/red]",
             str(m.get("relro", "?")),
-            danger[:40],
+            danger[:40] + note,
             ",".join(r.get("win_symbols", []))[:24] or "-",
         )
-    console.print(table)
+    if targets:
+        console.print(table)
+    else:
+        console.print("[yellow]No target executables found (only libraries/objects below).[/yellow]")
+
+    # References: libraries, relocatables, provided solutions — not ranked as targets.
+    if references:
+        ref = Table(title="[dim]References (not targets)[/dim]")
+        for col in ("File", "Role", "Note"):
+            ref.add_column(col)
+        for b, r, _ in references:
+            m = r.get("mitigations", {})
+            hint = {"library": "libc/.so — pair for ret2libc; fingerprint version",
+                    "relocatable": ".o object — not runnable",
+                    "solution?": "looks like a provided exploit/solution"}.get(r.get("role"), "")
+            ref.add_row(b.name, r.get("role", "?"), hint)
+        console.print(ref)
     console.print(
         "\n[yellow]⚠ Static attack-surface only — a LOW/MINIMAL score does NOT mean safe[/yellow] "
         "(logic/UAF/crypto bugs are invisible here).")
