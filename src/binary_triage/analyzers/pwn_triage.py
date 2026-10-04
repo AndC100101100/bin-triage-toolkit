@@ -130,6 +130,10 @@ class PwnTriage(BaseAnalyzer):
                 "reported as 'present' (unconfirmed), not scored. Disassemble to see which "
                 "are actually called, e.g. `objdump -d <bin> | grep -E 'call|bl '`."
             )
+        if role == "library":
+            # The one in-tool SCA slice: fingerprint the libc version so the
+            # References table can pair it with targets for ret2libc / one_gadget.
+            results["libc_version"] = F.libc_fingerprint(F.ascii_strings(file_data, min_len=5), syms)
         status = AnalysisStatus.SUCCESS if mitigations else AnalysisStatus.PARTIAL_SUCCESS
         return self._create_result(status, results=results, warnings=warnings)
 

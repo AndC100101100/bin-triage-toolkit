@@ -4,6 +4,7 @@ Binary Triage Toolkit - Main CLI application
 
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -577,13 +578,33 @@ def triage(targets, recursive, emit_exploit, output, profile, config):
         ref = Table(title="[dim]References (not targets)[/dim]")
         for col in ("File", "Role", "Note"):
             ref.add_column(col)
+        libc_vers = set()           # versions of the libc proper (for the ret2libc hint)
         for b, r, _ in references:
-            m = r.get("mitigations", {})
-            hint = {"library": "libc/.so — pair for ret2libc; fingerprint version",
-                    "relocatable": ".o object — not runnable",
-                    "solution?": "looks like a provided exploit/solution"}.get(r.get("role"), "")
-            ref.add_row(b.name, r.get("role", "?"), hint)
+            role = r.get("role")
+            if role == "library":
+                ver = r.get("libc_version")
+                low = b.name.lower()
+                if re.search(r"(^|/)libc[-.]", low) or low == "libc.so.6":
+                    hint = f"glibc {ver} — ret2libc target (pin it + one_gadget)" if ver else "the libc — ret2libc target"
+                    if ver:
+                        libc_vers.add(ver)
+                elif low.startswith("ld-") or "ld-linux" in low:
+                    hint = f"glibc {ver} loader (ld.so)" if ver else "dynamic loader (ld.so)"
+                else:
+                    hint = f"shared library (glibc symbols {ver})" if ver else "shared library — reference"
+            else:
+                hint = {"relocatable": ".o object — not runnable",
+                        "solution?": "looks like a provided exploit/solution"}.get(role, "")
+            ref.add_row(b.name, role or "?", hint)
         console.print(ref)
+
+        # ret2libc pairing hint: the libc proper + any dynamically-linked target.
+        dyn_targets = [b for b, r, _ in targets if r.get("mitigations", {}).get("static") is False]
+        if libc_vers and dyn_targets:
+            console.print(
+                f"[green]ret2libc:[/green] dynamic target(s) can be popped through the bundled "
+                f"libc (glibc {', '.join(sorted(libc_vers))}). Pin it: `pwn.ELF('libc.so.6')`; "
+                f"magic gadgets: `one_gadget libc.so.6`.")
     console.print(
         "\n[yellow]⚠ Static attack-surface only — a LOW/MINIMAL score does NOT mean safe[/yellow] "
         "(logic/UAF/crypto bugs are invisible here).")

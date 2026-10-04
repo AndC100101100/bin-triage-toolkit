@@ -24,3 +24,5 @@ wheels/
 
 # Local offline rule/DB caches
 config/yara_rules/compiled.yarc
+tests/_cli_fixture/
+tests/*.so
