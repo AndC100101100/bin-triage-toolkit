@@ -13,7 +13,7 @@ htmlcov/
 .coverage
 
 # Triage build / verification artifacts
-tests/vuln_weak
+tests/vuln_*
 tests/vuln_hard
 tests/*_exploit.py
 *_exploit.py

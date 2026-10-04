@@ -23,6 +23,7 @@ from .analyzers import (
     PEAnalyzer,
     ELFAnalyzer,
     PwnTriage,
+    RevTriage,
     BinDiff,
     FileInfo,
 )
@@ -432,19 +433,34 @@ def _load_profile_config(profile: Optional[str], config_path: Optional[str]) -> 
 
 
 def _iter_elf_targets(paths, recursive: bool):
-    """Expand files/dirs (incl. enochecker3 service trees) into ELF binaries."""
+    """Expand files/dirs (incl. enochecker3 service trees) into ELF binaries,
+    de-duplicated by content hash (repos often ship the same binary under both
+    src/ and attachments/)."""
+    import hashlib
     skip = {".git", "node_modules", "__pycache__", "docs"}
+    seen_hashes = set()
+
+    def _emit(f: Path):
+        try:
+            h = hashlib.sha256(f.read_bytes()).hexdigest()
+        except OSError:
+            return None
+        if h in seen_hashes:
+            return None
+        seen_hashes.add(h)
+        return f
+
     for raw in paths:
         p = Path(raw)
         if p.is_file():
-            if _is_elf(p):
+            if _is_elf(p) and _emit(p):
                 yield p
         elif p.is_dir():
             walker = p.rglob("*") if recursive else p.glob("*")
-            for f in walker:
+            for f in sorted(walker):
                 if any(part in skip for part in f.parts):
                     continue
-                if f.is_file() and _is_elf(f):
+                if f.is_file() and _is_elf(f) and _emit(f):
                     yield f
 
 
@@ -574,6 +590,74 @@ def triage(targets, recursive, emit_exploit, output, profile, config):
     console.print(
         "[dim]Have the source? Triage it with Opengrep first — this is the no-source/stripped "
         "fallback (+ checksec/diff). Hand off to Ghidra/pwntools; see A&D toolkit 03/05.[/dim]")
+
+
+@cli.command()
+@click.argument("targets", nargs=-1, required=True, type=click.Path(exists=True))
+@click.option("--recursive", "-r", is_flag=True, help="Recurse into directories / service trees")
+@click.option("--output", "-o", type=click.Path(), help="Directory to write per-binary JSON reports")
+@click.option("--profile", default="ad", help="Settings profile (default: ad = offline/no-AI)")
+@click.option("--config", "-c", type=click.Path(exists=True), help="Explicit config file (overrides --profile)")
+def rev(targets, recursive, output, profile, config):
+    """Reverse-engineering orientation of ELF binaries (what is it, where to start)."""
+    cfg = _load_profile_config(profile, config)
+    analyzer = RevTriage(cfg.get("rev_triage"))
+
+    binaries = list(_iter_elf_targets(targets, recursive))
+    if not binaries:
+        console.print("[yellow]No ELF binaries found in the given targets.[/yellow]")
+        return
+
+    out_dir = Path(output) if output else None
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    analyzed = []
+    for b in binaries:
+        r = analyzer.analyze(b).results
+        analyzed.append((b, r))
+        if out_dir:
+            (out_dir / f"{b.name}.json").write_text(json.dumps(r, indent=2, default=str))
+
+    table = Table(title="[bold]Reverse-Engineering Orientation[/bold]")
+    for col in ("Binary", "Role", "Lang", "Bits", "Flags", "User fns", "Anti-dbg", "Notable strings"):
+        table.add_column(col)
+    for b, r in analyzed:
+        fmt = r.get("format", {})
+        tc = r.get("toolchain", {})
+        flags = []
+        if fmt.get("static"):
+            flags.append("static")
+        flags.append("PIE" if fmt.get("pie") else "no-PIE")
+        flags.append("stripped" if fmt.get("stripped") else "symbols")
+        cats = r.get("strings", {}).get("categories", {})
+        notable = ",".join(k for k in ("flags_secrets", "urls", "commands", "errors_asserts") if k in cats) or "-"
+        fns = r.get("functions", {})
+        fn_cell = "stripped" if fmt.get("stripped") else str(fns.get("user_count", 0))
+        ad = r.get("anti_debug", [])
+        table.add_row(
+            b.name, r.get("role", "?"),
+            tc.get("language") or "?",
+            str(fmt.get("bits", "?")),
+            " ".join(flags),
+            fn_cell,
+            str(len(ad)) if ad else "-",
+            notable,
+        )
+    console.print(table)
+    # Per-binary orientation one-liners + hand-off, printed below the table.
+    for b, r in analyzed:
+        console.print(f"\n[bold cyan]{b.name}[/bold cyan]: {r.get('orientation', '')}")
+        if r.get("packer"):
+            console.print(f"  [red]packer:[/red] {', '.join(r['packer'])}")
+        if r.get("anti_debug"):
+            console.print(f"  [yellow]anti-debug:[/yellow] {'; '.join(r['anti_debug'])}")
+        if r.get("libc"):
+            console.print(f"  [green]libc:[/green] glibc {r['libc']} (pin for ret2libc / one_gadget)")
+        for tip in r.get("handoff", [])[:4]:
+            console.print(f"  → {tip}")
+    console.print("\n[dim]Orientation only — the actual RE happens in Ghidra/radare2. "
+                  "This tells you what you're looking at and where to start.[/dim]")
 
 
 @cli.command()

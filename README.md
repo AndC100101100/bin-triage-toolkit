@@ -1,287 +1,170 @@
 # Binary Triage Toolkit
 
-An open-source toolkit for automated binary analysis and triage, inspired by tools like opengrep.
-It has two orientations: **pwn triage for Attack & Defense (A&D)** — the primary focus for
-ECSC/FAUST — and malware/forensic analysis.
+Fast, static, offline first-pass triage of ELF binaries. It tells you *what a binary is, what's
+notable about it, and where to start* — then hands off to Ghidra/pwntools/radare2 for the actual
+deep work. Built for Attack & Defense (ECSC/FAUST) and CTF pwn/rev, with a malware/forensic mode.
 
-> ## ⚡ Attack & Defense (ECSC / FAUST) — start here
->
-> In A&D the vulnerable services are usually **Linux ELF binaries** (C/C++/Rust). The `triage`
-> command gives a fast first pass over *all* the service binaries at once: exploit mitigations
-> (checksec), dangerous functions → exploitation primitives, heap/win-symbol surface, and a
-> **ranked attack-surface score** (a triage aid for *where to look first* — **not** a verdict).
-> Then you hand off to Ghidra/pwntools.
->
-> **Scope, honestly:** this is static analysis of the *binary*. It cannot see logic, use-after-free,
-> or crypto bugs — exactly the kinds A&D hosts like to plant — so **a LOW/MINIMAL score never means
-> "safe"**. In A&D you usually *have* the source (it's on your vulnbox), so **triage the source with
-> Opengrep first**; reach for this tool for **stripped / no-source binaries**, and for `checksec` +
-> `diff` on any binary.
->
-> ```bash
-> pip install -e ".[ad]"                      # pwntools + capstone engine (no AI)
-> binary-triage triage path/to/service/ --profile ad --emit-exploit   # rank + pwntools skeleton
-> binary-triage diff pristine_bin patched_bin                         # defense: what did the patch change?
-> ```
->
-> **Competition constraints** (see the `config/settings.ad.yaml` profile):
-> - **No AI at runtime** — Magika (an ML model) is **disabled**; file typing falls back to
->   libmagic / magic bytes.
-> - **Offline** — use `requirements-ad.txt` (cache wheels during prep); no network calls.
-> - **ELF-first** — the malware modules (YARA families, CAPA/MITRE, PE/Office) are turned off.
-> - Fits the *A&D toolkit* workflow: **Opengrep** (source code) + **dep-scan** (dependency CVEs)
->   + **this toolkit** (ELF binaries).
+Design: **one extraction, multiple lenses.** A single neutral fact-base (`elf_facts`) is read by a
+`pwn` lens, a `rev` lens, and the malware analyzers. Deep analysis (exploit confirmation,
+decompilation, dependency CVE scanning) is deliberately a **hand-off, not a feature** — see
+[What it does not do](#what-it-does-not-do).
 
-## 🎯 Goal
-
-Provide fast, automated first-pass analysis of binaries — the way opengrep does for source code —
-ideal for:
-- Attack & Defense competitions (FAUST, ECSC, Attacking-Lab)
-- CTF (Capture The Flag) events
-- Initial forensic analysis
-- Malware triage
-- Security research
-
-## 🚀 Features
-
-### Attack & Defense (pwn) triage
-- **Exploit mitigations (checksec)**: NX, PIE, stack canary, RELRO (full/partial), FORTIFY,
-  stripped, static — via pwntools, with a `checksec`/`readelf` fallback.
-- **Vulnerable-surface mapping**: dangerous imported functions (`gets`, `strcpy`, `system`,
-  format-string family, …) mapped to exploitation primitives, plus win/backdoor symbol detection.
-- **Ranked exploitability**: a score + verdict per binary, so you know what to attack first.
-- **pwntools skeleton emitter** (`--emit-exploit`) and **binary diffing** (`diff`) for patch /
-  opponent analysis.
-
-### Fast static analysis (malware/forensic)
-- **File identification**: magic numbers, Magika (AI — disabled in the A&D profile)
-- **Signature detection**: YARA rules
-- **Capability analysis**: CAPA (MITRE ATT&CK mapping)
-- **String & IOC extraction**: URLs, IPs, domains, emails, paths (plus A&D strings:
-  flag paths, `/bin/sh`, format specifiers, secrets)
-- **Metadata**: ExifTool for forensic information
-
-### Format-specific analysis
-- **ELF (Linux/Unix)**: readelf/pwntools — symbols, sections, architecture, mitigations
-- **PE (Windows)**: Detect It Easy, sections, imports/exports
-- **Office documents**: oletools, macro extraction
-
-### Reports
-- Structured JSON for integration with other tools
-- Human-readable Markdown
-- Pretty terminal tables (via `rich`)
-
-## 📦 Installation
+## Install
 
 ```bash
-# Clone the repository
 git clone https://github.com/AndC100101100/bin-triage-toolkit.git
 cd bin-triage-toolkit
-
-# A&D (recommended): pwn engine, no AI, offline
-pip install -e ".[ad]"
-# or, for malware/forensic analysis (includes AI modules):
-pip install -e ".[malware]"
-# minimal offline set for the competition:
-#   pip install -r requirements-ad.txt
-
-# External tools (install via system package manager / pipx, not pip):
-#   checksec, binutils (readelf/objdump/nm), ROPgadget/ropper, one_gadget, pwninit,
-#   ghidra and/or radare2   -> the hand-off after triage
-# For the malware path (optional):
-sudo apt-get install yara libimage-exiftool-perl   # YARA + ExifTool
-pip install flare-capa                             # CAPA
-# Detect It Easy (PE analysis): https://github.com/horsicq/Detect-It-Easy
+pip install -e ".[ad]"          # pwn/rev engine: pwntools + capstone (no AI)
+#   or, from the repo without installing:  export PYTHONPATH=src
 ```
 
-## 🔧 Basic usage
+Offline competition setup: `pip install -r requirements-ad.txt` (cache wheels during prep).
+Malware/forensic extras (YARA, CAPA, PE, Magika): `pip install -e ".[malware]"`.
+
+External tools used when present (none required): `checksec`, `readelf`/`nm`/`objdump` (binutils),
+and for the hand-off `ghidra`, `radare2`, `ROPgadget`, `one_gadget`, `pwninit`.
+
+## Commands
+
+### `triage` — pwn / A&D attack-surface (default lens)
+
+Ranks ELF targets by attack surface so you know what to look at first.
 
 ```bash
-# A&D: rank the ELF service binaries by exploitability (offline, no-AI profile)
-binary-triage triage path/to/service/ --profile ad --recursive --emit-exploit
-
-# Diff two ELF binaries (pristine vs patched / opponent)
-binary-triage diff pristine_bin patched_bin
-
-# Malware/forensic: full analysis of one file
-binary-triage analyze sample.bin
-
-# Quick analysis (file identification + YARA only)
-binary-triage analyze sample.bin --quick
-
-# Specific modules
-binary-triage analyze sample.bin --modules yara_scanner,capa_analyzer,string_extractor
-
-# Batch a directory
-binary-triage batch ./samples --pattern "*" --output ./results
-
-# JSON output (for automation)
-binary-triage analyze sample.bin --format json --output report.json
+binary-triage triage <file|dir ...> --profile ad [--recursive] [--emit-exploit] [-o OUTDIR]
 ```
 
-## 📊 Analysis modules
+Reports per binary: exploit mitigations (NX, PIE, canary, RELRO, FORTIFY, static, stripped);
+dangerous **called** functions mapped to primitives (`gets`→BOF, `system`→ret2system,
+`printf`→format string, …); heap surface (UAF/double-free); win/backdoor symbols; pwn strings
+(`/bin/sh`, flag paths); and a ranked **attack-surface score** (a *where-to-look* aid, not a
+verdict). `--emit-exploit` writes a pwntools skeleton per target. Libraries/`.o`/solutions are
+listed separately as References (with a ret2libc hint), never ranked as targets.
 
-### Pwn Triage (A&D core)
-```python
-from binary_triage.analyzers import PwnTriage
-
-result = PwnTriage().analyze("service_binary")
-r = result.results
-print(r["mitigations"])            # {'nx': False, 'pie': False, 'canary': False, 'relro': 'Partial', ...}
-print(r["dangerous_functions"])    # [{'function': 'gets', 'primitive': 'stack buffer overflow', ...}]
-print(r["win_symbols"])            # ['win']
-print(r["exploitability"])         # {'score': 100, 'verdict': 'HIGH', 'summary': '...'}
-```
-
-### Binary diff
-```python
-from binary_triage.analyzers import BinDiff
-
-result = BinDiff().diff("pristine", "patched")
-print(result.results["suspect_functions"])   # functions that changed = likely the bug/patch
-```
-
-### String & A&D/IOC extractor
-```python
-from binary_triage.analyzers import StringExtractor
-
-res = StringExtractor({"extract_ad": True}).analyze("service_binary")
-print(res.results["ad_strings"])   # {'flag_paths': [...], 'shell': ['/bin/sh'], ...}
-print(res.results["iocs"])         # URLs/IPs/domains (malware framing; off in the A&D profile)
-```
-
-### ELF / PE / File identification / YARA / CAPA
-```python
-from binary_triage.analyzers import ELFAnalyzer, FileIdentifier
-
-print(ELFAnalyzer().analyze("sample.elf").results["security"])   # checksec dict
-print(FileIdentifier().analyze("sample.bin").results["file_type"])
-# YaraScanner, CapaAnalyzer, PEAnalyzer follow the same analyze() -> AnalysisResult shape.
-```
-
-## 🎨 Example output (triage)
-
-```
-                         Exploitability Triage (ranked)
-┏━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━┳━━━━━━━┳━━━━┳━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━┓
-┃ Binary    ┃ Score ┃ Verdict ┃ Arch  ┃ NX ┃ PIE ┃ Canary ┃ RELRO   ┃ Danger ┃ Win ┃
-┡━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━╇━━━━━━━╇━━━━╇━━━━━╇━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━┩
-│ vuln_weak │ 100   │ HIGH    │ amd64 │ ✗  │ ✗   │ ✗      │ Partial │ gets,… │ win │
-│ vuln_hard │ 68    │ HIGH    │ amd64 │ ✓  │ ✓   │ ✓      │ Full    │ gets,… │ win │
-└───────────┴───────┴─────────┴───────┴────┴─────┴────────┴─────────┴────────┴─────┘
-```
-
-## 🏗️ Architecture
-
-```
-bin-triage-toolkit/
-├── src/binary_triage/
-│   ├── analyzers/
-│   │   ├── base.py              # BaseAnalyzer ABC + AnalysisResult / FileInfo
-│   │   ├── pwn_triage.py        # A&D: checksec + dangerous funcs + exploitability score
-│   │   ├── bindiff.py           # pristine vs patched/opponent diff
-│   │   ├── elf_analyzer.py      # ELF header/sections/symbols/security
-│   │   ├── file_identifier.py   # magic / Magika (AI, off in A&D)
-│   │   ├── string_extractor.py  # strings + A&D strings + IOCs
-│   │   ├── yara_scanner.py      # YARA (optional, [malware])
-│   │   ├── capa_analyzer.py     # CAPA / MITRE (optional, [malware])
-│   │   └── pe_analyzer.py       # Windows PE (optional, [malware])
-│   ├── main.py                  # CLI: analyze, batch, triage, diff
-│   └── __main__.py              # python -m binary_triage
-├── config/
-│   ├── settings.yaml            # default profile
-│   ├── settings.ad.yaml         # Attack & Defense profile (offline, no AI)
-│   └── yara_rules/ad_indicators.yar
-├── examples/                    # ad_workflow.py, ctf_workflow.py, basic_usage.py
-└── tests/                       # vuln.c + test_pwn_triage.py
-```
-
-## 🔍 Use cases
-
-### Attack & Defense — triage the service binaries
 ```bash
-# Rank every ELF under a service tree and emit pwntools skeletons for exploitable ones
-binary-triage triage /srv/services/ --profile ad --recursive --emit-exploit
+binary-triage triage ./service/ --profile ad --recursive --emit-exploit
+binary-triage triage ./bin/server --profile ad -o reports/   # also writes reports/server.json
 ```
 
-### Attack & Defense — binary patching / opponent analysis
+Static binaries: a bundled-libc function being *present* is not proof it's *called*, so for static
+binaries dangerous functions are listed as "present (unconfirmed)" and not scored — disassemble to
+confirm.
+
+### `rev` — reverse-engineering orientation
+
+Answers "what is this and where do I start reversing it" for the rev category.
+
 ```bash
-# Confirm our in-place patch changed only what we intended; or infer an opponent's patched bug
-binary-triage diff pristine_bin other_bin
+binary-triage rev <file|dir ...> --profile ad [--recursive] [-o OUTDIR]
 ```
 
-### Malware / forensic — full analysis
+Reports: language + compiler (Go/Rust/C++/C, from `.comment`/strings/symbols), arch/bits,
+static/PIE/stripped, user-defined function count + sample (libc/runtime filtered out), packer (UPX,
+stripped section headers), anti-debug indicators (from imports + strings, not bundled-libc noise),
+categorised strings (flags/secrets, urls, paths, commands, format, asserts), libc version
+fingerprint, and language-specific **hand-off tips** (Ghidra/radare2; `c++filt`/`rustfilt`;
+Go `.gopclntab`). Orientation only — the RE happens in the tools it points you to.
+
 ```bash
-binary-triage analyze evidence.bin --format markdown --output investigation.md
+binary-triage rev ./challenges/ --profile ad --recursive
 ```
 
-## 🤝 Comparison with other tools
+### `diff` — binary diff (defense / opponent analysis)
 
-| Feature            | Binary Triage Toolkit | Cuckoo | REMnux |
-|--------------------|-----------------------|--------|--------|
-| Static analysis    | ✅                    | ❌     | ✅     |
-| Pwn/A&D triage      | ✅                    | ❌     | ❌     |
-| Dynamic analysis   | ❌                    | ✅     | ✅     |
-| Open source        | ✅                    | ✅     | ✅     |
-| Simple CLI         | ✅                    | ❌     | ✅     |
-| JSON/automation    | ✅                    | ✅     | ❌     |
+```bash
+binary-triage diff <pristine> <other> [-f table|json]
+```
 
-## ⚠️ Limitations (and what's deliberately out of scope for now)
+Section, symbol, byte-range and changed-function diff between two ELFs. Use it to confirm an
+in-place patch changed only what you intended, or to spot which function an opponent patched
+(= the bug they found).
 
-- **Static, binary-only.** No data-flow — it reports that a risky function/surface *exists*, not
-  that user input *reaches* it. The score is a triage aid, not an exploitability proof.
-- **C/libc-centric catalog.** Dangerous-function mapping targets the C/libc idiom (incl. FORTIFY
-  `_chk` and `__isoc99_` variants). **Rust/Go binaries** (different panic/alloc/idioms) are not yet
-  modelled — planned as a follow-up, per-binary-type.
-- **Source beats this when you have it.** Opengrep on source is the primary code-review lane;
-  binary triage is the no-source/stripped fallback plus checksec/diff.
+### `analyze` / `batch` — malware / forensic mode
 
-## 📝 Roadmap
+```bash
+binary-triage analyze <file> [--quick] [--modules yara_scanner,capa_analyzer,string_extractor]
+binary-triage batch <dir> --pattern '*' -o results/
+```
 
-- [x] Project base structure
-- [x] PE/ELF analysis (core modules + file-id/strings)
-- [x] YARA / CAPA integration (optional, `[malware]`)
-- [x] IOC extractor + A&D strings
-- [x] **A&D pwn triage** (`triage`: checksec + dangerous functions + score)
-- [x] **Binary diff** (`diff`: pristine vs patched/opponent)
-- [x] pwntools skeleton emitter (`--emit-exploit`)
-- [x] Offline / no-AI profile (`--profile ad`)
-- [x] CLI (`analyze`, `batch`, `triage`, `diff`)
-- [ ] HTML report generator
-- [ ] `--from-container` (pull a binary off a running vulnbox)
-- [ ] Per-binary-type depth: Rust / Go idioms, static-vs-dynamic nuances
-- [ ] Optional data-flow (angr/decompiler) to confirm reachability of a sink
-- [ ] REST API / Docker / CI
+File identification (libmagic/Magika), YARA, CAPA (MITRE ATT&CK), PE/Office analysis, string/IOC
+extraction. Requires the `[malware]` extra. Not used in A&D (Magika is an ML model → disabled by the
+`ad` profile).
 
-## 🤝 Contributing
+## Profiles
 
-Contributions are welcome:
+`--profile ad` (default for `triage`/`rev`) loads `config/settings.ad.yaml`: ELF-first, **no AI at
+runtime** (Magika off; libmagic/magic-byte typing), IOC extraction off, malware modules off, quiet
+logging. Point `--config FILE` at your own YAML to override. Without a profile the full default
+config (`config/settings.yaml`) applies.
 
-1. Fork the project
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+## Binary roles
 
-## 📄 License
+Every target is classified from ELF structure (ET_REL, PT_INTERP, DT_SONAME, static-PIE), not just
+its name:
 
-MIT License — see [LICENSE](LICENSE) for details.
+| Role | Meaning |
+|------|---------|
+| `executable` | a real target — ranked/triaged |
+| `library` | libc / `ld` / `.so` module — a reference (pair for ret2libc, fingerprint version) |
+| `relocatable` | `.o` object — not runnable |
+| `solution?` | looks like a provided exploit/solution, not a challenge |
 
-## 🙏 Acknowledgements
+## What it does not do
 
-Inspired by open-source tools such as:
-- [pwntools](https://github.com/Gallopsled/pwntools) — binary exploitation / ELF parsing
-- [CAPA](https://github.com/mandiant/capa) — Mandiant/FireEye
-- [YARA](https://github.com/VirusTotal/yara) — VirusTotal
-- [Detect It Easy](https://github.com/horsicq/Detect-It-Easy) — horsicq
-- [oletools](https://github.com/decalage2/oletools) — decalage2
-- [Semgrep](https://github.com/semgrep/semgrep) — concept inspiration
+By design, these are hand-offs, not features (keeps the tool focused and its output trustworthy):
 
-## 📧 Contact
+- **Confirm exploitability / data-flow** — it flags that a dangerous sink or surface *exists*, not
+  that input reaches it. Confirm in pwntools/gdb.
+- **Decompile / analyse control flow** — that's Ghidra/radare2; the tool tells you which to use and how.
+- **Dependency CVE scanning (SCA)** — use OWASP dep-scan as a separate lane. The one SCA slice kept
+  in-tool is the libc **version fingerprint** (for ret2libc).
 
-- GitHub Issues: [bin-triage-toolkit/issues](https://github.com/AndC100101100/bin-triage-toolkit/issues)
+A low/MINIMAL score never means "safe": static analysis can't see logic, use-after-free or crypto
+bugs. If you have the source, review it (e.g. with Opengrep) first; this tool is the
+stripped/no-source fallback plus checksec/diff/orientation.
 
----
+## Library use
 
-**⚠️ Disclaimer**: This tool is designed for legitimate security analysis. Misuse may be illegal.
-Use it responsibly.
+```python
+from binary_triage.analyzers import PwnTriage, RevTriage, BinDiff
+from binary_triage.analyzers import elf_facts
+
+pwn = PwnTriage().analyze("server").results          # mitigations, dangerous_functions, exploitability
+rev = RevTriage().analyze("server").results          # toolchain, functions, strings, handoff, orientation
+diff = BinDiff().diff("pristine", "patched").results # suspect_functions, symbol/section deltas
+mitig = elf_facts.checksec("server")                 # raw fact-base primitives
+```
+
+## Architecture
+
+```
+src/binary_triage/
+├── analyzers/
+│   ├── elf_facts.py      # neutral fact-base: role, checksec, symbols, strings,
+│   │                     #   toolchain/packer/anti-debug, libc fingerprint (shared)
+│   ├── pwn_triage.py     # pwn lens  -> attack-surface view
+│   ├── rev_triage.py     # rev lens  -> orientation view
+│   ├── bindiff.py        # two-binary diff
+│   ├── file_identifier / yara_scanner / capa_analyzer / pe_analyzer / string_extractor  # malware mode
+│   └── base.py           # BaseAnalyzer, AnalysisResult, FileInfo
+├── main.py               # CLI: triage, rev, diff, analyze, batch
+└── __main__.py           # python -m binary_triage
+config/settings.ad.yaml   # Attack & Defense profile (offline, no AI)
+```
+
+## Limitations
+
+- Static and binary-only; no data-flow (the score is a triage aid, not a proof).
+- Dangerous-function catalog is C/libc-centric; Rust/Go idioms are not yet modelled (roadmap).
+- Language/compiler/packer detection is heuristic (`.comment`, strings, symbols, sections).
+
+## Tests
+
+```bash
+pip install -e ".[dev]"
+pytest            # pwn + rev + bindiff; tests compile tests/vuln.c, skip if gcc is absent
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
