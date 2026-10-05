@@ -20,6 +20,9 @@ tests/*_exploit.py
 *_triage.json
 opengrep-out/
 reports/
+out/
+report.html
+report.md
 wheels/
 
 # Local offline rule/DB caches
