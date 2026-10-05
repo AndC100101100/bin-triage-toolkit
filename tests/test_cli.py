@@ -68,3 +68,11 @@ def test_cli_diff_runs(weak):
     r = CliRunner().invoke(cli, ["diff", str(weak), str(weak)])
     assert r.exit_code == 0, r.output
     assert "identical" in r.output.lower()
+
+
+def test_cli_report_writes_artifacts(weak, tmp_path):
+    out = tmp_path / "rep"
+    r = CliRunner().invoke(cli, ["report", str(weak), "--profile", "ad", "-o", str(out)])
+    assert r.exit_code == 0, r.output
+    assert "finding(s)" in r.output
+    assert (out / "report.html").exists() and (out / "report.md").exists()
