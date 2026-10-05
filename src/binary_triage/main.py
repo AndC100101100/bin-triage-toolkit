@@ -15,6 +15,11 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.panel import Panel
 from rich.markdown import Markdown
+from rich.markup import escape
+
+from .analyzers.findings import (
+    build_findings, counts as finding_counts, to_schema_findings, schema_envelope,
+)
 
 from .analyzers import (
     FileIdentifier,
@@ -513,7 +518,9 @@ if __name__ == "__main__":
 @click.option("--output", "-o", type=click.Path(), help="Directory to write per-binary JSON reports")
 @click.option("--profile", default="ad", help="Settings profile (default: ad = offline/no-AI)")
 @click.option("--config", "-c", type=click.Path(exists=True), help="Explicit config file (overrides --profile)")
-def triage(targets, recursive, emit_exploit, output, profile, config):
+@click.option("--format", "-f", "fmt", type=click.Choice(["table", "json"]), default="table",
+              help="table (default) or json (schema/finding.v1.json envelope)")
+def triage(targets, recursive, emit_exploit, output, profile, config, fmt):
     """A&D exploitability triage of ELF service binaries (ranked)."""
     cfg = _load_profile_config(profile, config)
     analyzer = PwnTriage(cfg.get("pwn_triage"))
@@ -521,20 +528,29 @@ def triage(targets, recursive, emit_exploit, output, profile, config):
 
     binaries = list(_iter_elf_targets(targets, recursive))
     if not binaries:
-        console.print("[yellow]No ELF binaries found in the given targets.[/yellow]")
+        if fmt == "json":
+            print(json.dumps(schema_envelope([]), indent=2))
+        else:
+            console.print("[yellow]No ELF binaries found in the given targets.[/yellow]")
         return
 
     out_dir = Path(output) if output else None
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    targets, references = [], []
+    scored, needs_manual, references = [], [], []
     for b in binaries:
         res = analyzer.analyze(b)
         r = res.results
         role = r.get("role", "executable")
         expl = r.get("exploitability", {})
-        (targets if role == "executable" else references).append((b, r, expl.get("score", 0)))
+        score = expl.get("score", 0)
+        if role != "executable":
+            references.append((b, r, score))
+        elif r.get("triage_status") == "needs-manual":
+            needs_manual.append((b, r, score))
+        else:
+            scored.append((b, r, score))
         if out_dir:
             try:
                 str_res = strings.analyze(b).results.get("ad_strings", {})
@@ -542,14 +558,53 @@ def triage(targets, recursive, emit_exploit, output, profile, config):
                 str_res = {}
             payload = {"file": str(b), "pwn_triage": r, "ad_strings": str_res}
             (out_dir / f"{b.name}.json").write_text(json.dumps(payload, indent=2, default=str))
-        if emit_exploit and role == "executable" and expl.get("score", 0) > 0:
+        if emit_exploit and role == "executable" and score > 0:
             skel = _emit_exploit_skeleton(b, r)
             console.print(f"[green]exploit skeleton:[/green] {skel}")
 
-    targets.sort(key=lambda x: x[2], reverse=True)
+    if fmt == "json":
+        # Schema-conforming findings across all target executables (scored first,
+        # then needs-manual), for a downstream dashboard / merge step.
+        recs = []
+        for b, r, _ in scored + needs_manual:
+            fs = build_findings(b.name, r)
+            recs.extend(to_schema_findings(b.name, fs,
+                                           triage_status=r.get("triage_status", "scored")))
+        print(json.dumps(schema_envelope(recs), indent=2, default=str))
+        return
+
+    # Needs-manual bucket (static / stripped / Go / Rust) goes ABOVE the ranked
+    # targets: these can't be scored from static imports, so they must never sink
+    # below a scored C binary just because their call surface is invisible here.
+    if needs_manual:
+        nm = Table(title="[bold yellow]⚠ Needs manual look — not scorable statically[/bold yellow]")
+        for col in ("Binary", "Why", "Lang", "Arch", "NX", "PIE", "Canary", "Danger (if recovered)", "Win"):
+            nm.add_column(col)
+        needs_manual.sort(key=lambda x: x[2], reverse=True)
+        for b, r, score in needs_manual:
+            m = r.get("mitigations", {})
+            why = "; ".join(r.get("triage_reason", [])) or "needs manual review"
+            danger = ",".join(sorted({d["function"] for d in r.get("dangerous_functions", [])})) or "—"
+            win = r.get("win_symbols") or [t["func"] for t in r.get("win_targets", [])]
+            nm.add_row(
+                escape(b.name), escape(why[:60]), escape(str(r.get("language") or "?")),
+                str(m.get("arch", "?")),
+                "✓" if m.get("nx") else "[red]✗[/red]",
+                "✓" if m.get("pie") else "[red]✗[/red]",
+                "✓" if m.get("canary") else "[red]✗[/red]",
+                escape(danger[:40]),
+                escape(",".join(win)[:24]) or "—",
+            )
+        console.print(nm)
+        console.print("[dim]→ reverse these in Ghidra/radare2; static imports under-count their surface.[/dim]\n")
+
+    targets = scored
+    # network-facing breaks ties so the actual service sorts above compute helpers
+    # of equal score.
+    targets.sort(key=lambda x: (x[2], x[1].get("network_facing", False)), reverse=True)
 
     table = Table(title="[bold]Attack-Surface Triage (ranked targets)[/bold]")
-    for col in ("Binary", "Score", "Verdict", "Arch", "NX", "PIE", "Canary", "RELRO", "Danger", "Win"):
+    for col in ("Binary", "Score", "Verdict", "Arch", "Net", "NX", "PIE", "Canary", "RELRO", "Danger", "Win"):
         table.add_column(col)
     verdict_color = {"HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan", "MINIMAL": "green"}
     for b, r, score in targets:
@@ -557,16 +612,18 @@ def triage(targets, recursive, emit_exploit, output, profile, config):
         v = r.get("exploitability", {}).get("verdict", "?")
         danger = ",".join(sorted({d["function"] for d in r.get("dangerous_functions", [])})) or "-"
         note = " [dim](static: funcs unconfirmed)[/dim]" if m.get("static") else ""
+        win = r.get("win_symbols") or [t["func"] for t in r.get("win_targets", [])]
         table.add_row(
-            b.name, str(score),
+            escape(b.name), str(score),
             f"[{verdict_color.get(v, 'white')}]{v}[/{verdict_color.get(v, 'white')}]",
             str(m.get("arch", "?")),
+            "[green]net[/green]" if r.get("network_facing") else "-",
             "✓" if m.get("nx") else "[red]✗[/red]",
             "✓" if m.get("pie") else "[red]✗[/red]",
             "✓" if m.get("canary") else "[red]✗[/red]",
             str(m.get("relro", "?")),
-            danger[:40] + note,
-            ",".join(r.get("win_symbols", []))[:24] or "-",
+            escape(danger[:40]) + note,
+            escape(",".join(win)[:24]) or "-",
         )
     if targets:
         console.print(table)
@@ -595,7 +652,7 @@ def triage(targets, recursive, emit_exploit, output, profile, config):
             else:
                 hint = {"relocatable": ".o object — not runnable",
                         "solution?": "looks like a provided exploit/solution"}.get(role, "")
-            ref.add_row(b.name, role or "?", hint)
+            ref.add_row(escape(b.name), escape(role or "?"), escape(hint))
         console.print(ref)
 
         # ret2libc pairing hint: the libc proper + any dynamically-linked target.
@@ -605,6 +662,7 @@ def triage(targets, recursive, emit_exploit, output, profile, config):
                 f"[green]ret2libc:[/green] dynamic target(s) can be popped through the bundled "
                 f"libc (glibc {', '.join(sorted(libc_vers))}). Pin it: `pwn.ELF('libc.so.6')`; "
                 f"magic gadgets: `one_gadget libc.so.6`.")
+
     console.print(
         "\n[yellow]⚠ Static attack-surface only — a LOW/MINIMAL score does NOT mean safe[/yellow] "
         "(logic/UAF/crypto bugs are invisible here).")
@@ -657,22 +715,22 @@ def rev(targets, recursive, output, profile, config):
         fn_cell = "stripped" if fmt.get("stripped") else str(fns.get("user_count", 0))
         ad = r.get("anti_debug", [])
         table.add_row(
-            b.name, r.get("role", "?"),
-            tc.get("language") or "?",
+            escape(b.name), escape(r.get("role", "?")),
+            escape(tc.get("language") or "?"),
             str(fmt.get("bits", "?")),
             " ".join(flags),
             fn_cell,
             str(len(ad)) if ad else "-",
-            notable,
+            escape(notable),
         )
     console.print(table)
     # Per-binary orientation one-liners + hand-off, printed below the table.
     for b, r in analyzed:
-        console.print(f"\n[bold cyan]{b.name}[/bold cyan]: {r.get('orientation', '')}")
+        console.print(f"\n[bold cyan]{escape(b.name)}[/bold cyan]: {escape(str(r.get('orientation', '')))}")
         if r.get("packer"):
-            console.print(f"  [red]packer:[/red] {', '.join(r['packer'])}")
+            console.print(f"  [red]packer:[/red] {escape(', '.join(r['packer']))}")
         if r.get("anti_debug"):
-            console.print(f"  [yellow]anti-debug:[/yellow] {'; '.join(r['anti_debug'])}")
+            console.print(f"  [yellow]anti-debug:[/yellow] {escape('; '.join(r['anti_debug']))}")
         if r.get("libc"):
             console.print(f"  [green]libc:[/green] glibc {r['libc']} (pin for ret2libc / one_gadget)")
         for tip in r.get("handoff", [])[:4]:
@@ -685,30 +743,175 @@ def rev(targets, recursive, output, profile, config):
 @click.argument("pristine", type=click.Path(exists=True))
 @click.argument("other", type=click.Path(exists=True))
 @click.option("--format", "-f", type=click.Choice(["table", "json"]), default="table")
-def diff(pristine, other, format):
-    """Diff two ELF binaries (pristine vs patched / opponent) to locate changes."""
-    result = BinDiff().diff(Path(pristine), Path(other))
+@click.option("--allow", "allow", multiple=True,
+              help="Function allowed to change (repeatable). Turns diff into a patch gate.")
+@click.option("--allow-file", type=click.Path(exists=True),
+              help="File of allowed-to-change function names (one per line; # comments ok).")
+@click.option("--timeout", type=float, default=3.0, show_default=True,
+              help="Wall-clock budget (s); degrades to hash+sections rather than hang.")
+def diff(pristine, other, format, allow, allow_file, timeout):
+    """Patch guard: diff a pristine build of YOUR service against the patched one.
+
+    Confirms the patch changed only the function(s) you intended. Function bodies
+    are compared at normalized-disassembly level, so a plain recompile of
+    unchanged source shows no changes (relocation noise is masked out).
+
+    With --allow/--allow-file this becomes a gate: exit 0 if the only changed
+    functions are allowlisted, exit 2 otherwise (for deploy scripts)."""
+    result = BinDiff().diff(Path(pristine), Path(other), timeout=timeout)
     r = result.results
+
+    allowlist = list(allow)
+    if allow_file:
+        for line in Path(allow_file).read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                allowlist.append(line)
+    gate_on = bool(allowlist)
+
+    suspects = r.get("suspect_functions", []) or []
+    gate = BinDiff.gate(suspects, allowlist)
+    r["gate"] = {**gate, "enforced": gate_on, "allowlist": sorted(set(allowlist))}
+    # exit 2 only when enforcing an allowlist and something outside it changed.
+    exit_code = 2 if (gate_on and not gate["ok"]) else 0
+
     if format == "json":
-        console.print(json.dumps(result.to_dict(), indent=2, default=str))
-        return
+        print(json.dumps(result.to_dict(), indent=2, default=str))
+        sys.exit(exit_code)
     if r.get("identical"):
         console.print("[green]Binaries are byte-identical.[/green]")
-        return
+        sys.exit(0)
     console.print(Panel(
         f"A: {r['a']['path']}  ({r['a']['size']:,} B)\n"
         f"B: {r['b']['path']}  ({r['b']['size']:,} B)\n"
-        f"changed byte-ranges: {len(r.get('changed_byte_ranges', []))}",
-        title="[bold cyan]Binary Diff[/bold cyan]", border_style="cyan"))
-    if suspects := r.get("suspect_functions"):
-        console.print(f"[bold red]Changed functions (likely the patch/bug):[/bold red] {', '.join(suspects)}")
+        f"changed byte-ranges: {len(r.get('changed_byte_ranges', []))}"
+        + ("  [yellow](degraded)[/yellow]" if r.get("degraded") else ""),
+        title="[bold cyan]Binary Patch Diff[/bold cyan]", border_style="cyan"))
+    if r.get("note"):
+        console.print(f"[yellow]{escape(str(r['note']))}[/yellow]")
+    if suspects:
+        console.print(f"[bold red]Changed functions:[/bold red] {escape(', '.join(suspects))}")
+    else:
+        console.print("[green]No changed functions (after normalization).[/green]")
     syms = r.get("symbols", {})
     if syms.get("added"):
-        console.print(f"[green]Symbols added:[/green] {', '.join(syms['added'][:20])}")
+        console.print(f"[green]Symbols added:[/green] {escape(', '.join(syms['added'][:20]))}")
     if syms.get("removed"):
-        console.print(f"[yellow]Symbols removed:[/yellow] {', '.join(syms['removed'][:20])}")
+        console.print(f"[yellow]Symbols removed:[/yellow] {escape(', '.join(syms['removed'][:20]))}")
     if sec := r.get("sections"):
-        console.print(f"[cyan]Changed sections:[/cyan] {', '.join(s['section'] for s in sec)}")
+        console.print(f"[cyan]Changed sections:[/cyan] {escape(', '.join(s['section'] for s in sec))}")
+    if gate_on:
+        if gate["ok"]:
+            console.print(f"[bold green]✓ patch gate PASS[/bold green] — only allowlisted "
+                          f"function(s) changed ({escape(', '.join(gate['allowed_hit']) or 'none')}).")
+        else:
+            console.print(f"[bold red]✗ patch gate FAIL[/bold red] — unexpected change(s): "
+                          f"{escape(', '.join(gate['violations']))}. "
+                          f"Allowlisted: {escape(', '.join(allowlist))}.")
+    sys.exit(exit_code)
+
+
+_SEV_STYLE = {"ERROR": "bold red", "WARNING": "yellow", "INFO": "dim cyan"}
+
+
+@cli.command()
+@click.argument("targets", nargs=-1, required=True, type=click.Path(exists=True))
+@click.option("--recursive", "-r", is_flag=True, help="Recurse into directories / service trees")
+@click.option("--output", "-o", type=click.Path(), help="Write report.html + report.md here")
+@click.option("--profile", default="ad", help="Settings profile (default: ad = offline/no-AI)")
+@click.option("--config", "-c", type=click.Path(exists=True), help="Explicit config file (overrides --profile)")
+def report(targets, recursive, output, profile, config):
+    """Consolidated, dashboard-style findings over all binaries (shareable HTML/MD)."""
+    cfg = _load_profile_config(profile, config)
+    pwn = PwnTriage(cfg.get("pwn_triage"))
+    rev = RevTriage(cfg.get("rev_triage"))
+
+    binaries = list(_iter_elf_targets(targets, recursive))
+    if not binaries:
+        console.print("[yellow]No ELF binaries found in the given targets.[/yellow]")
+        return
+
+    report_rows = []  # (name, role, findings, counts)
+    skipped = []      # libraries / objects / solutions — references, not targets
+    for b in binaries:
+        p = pwn.analyze(b).results
+        role = p.get("role", "executable")
+        if role != "executable":
+            skipped.append((b.name, role))
+            continue
+        r = rev.analyze(b).results
+        fs = build_findings(b.name, p, r)
+        report_rows.append((b.name, role, fs, finding_counts(fs)))
+
+    # order: binaries with the most severe findings first
+    report_rows.sort(key=lambda x: (-x[3].get("ERROR", 0), -x[3].get("WARNING", 0), x[0]))
+
+    # ---- terminal (the dashboard-style view) ----
+    for name, role, fs, c in report_rows:
+        head = f"[bold]{escape(name)}[/bold] ({role}) — {c['total']} finding(s): " \
+               f"[bold red]{c['ERROR']} error[/bold red] · [yellow]{c['WARNING']} warning[/yellow] · {c['INFO']} info"
+        console.print("\n" + head)
+        if not fs:
+            console.print("  [dim]no notable static findings — reverse it (Ghidra/radare2)[/dim]")
+        for f in fs:
+            style = _SEV_STYLE.get(f["severity"], "white")
+            console.print(
+                f"  [{style}]{f['severity']}[/{style}] "
+                f"[magenta]{f['impact']}[/magenta] [cyan]{f['id']}[/cyan] "
+                f"{escape(f['where'])}  [dim]conf {f['confidence']}[/dim]")
+            console.print(f"    {escape(f['message'])}")
+
+    if output:
+        out = Path(output); out.mkdir(parents=True, exist_ok=True)
+        (out / "report.md").write_text(_findings_md(report_rows))
+        (out / "report.html").write_text(_findings_html(report_rows))
+        console.print(f"\n[green]Wrote[/green] {out/'report.md'} and {out/'report.html'}")
+
+    if skipped:
+        console.print(f"\n[dim]Skipped {len(skipped)} reference(s) (not targets): "
+                      + ", ".join(f"{n} ({r})" for n, r in skipped[:8])
+                      + ("…" if len(skipped) > 8 else "") + "[/dim]")
+    console.print("\n[dim]Static binary triage — points you at the surface; confirm/exploit in "
+                  "Ghidra/pwntools. Covers the binary-only services the source scanner can't.[/dim]")
+
+
+def _findings_md(rows) -> str:
+    lines = ["# Binary triage report", ""]
+    for name, role, fs, c in rows:
+        lines.append(f"## {name} ({role}) — {c['total']} findings: {c['ERROR']} error, {c['WARNING']} warning, {c['INFO']} info")
+        if not fs:
+            lines.append("- _no notable static findings — reverse it (Ghidra/radare2)_")
+        for f in fs:
+            lines.append(f"- **{f['severity']}** · `{f['impact']}` · `{f['id']}` · {f['where']} · conf {f['confidence']}  \n  {f['message']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _findings_html(rows) -> str:
+    import html
+    css = ("body{font:14px system-ui,sans-serif;margin:2rem;max-width:60rem}"
+           "h2{border-bottom:1px solid #ccc;padding-top:1rem}"
+           ".f{border-left:4px solid #ccc;padding:.4rem .8rem;margin:.5rem 0;background:#fafafa}"
+           ".ERROR{border-color:#d33}.WARNING{border-color:#e90}.INFO{border-color:#09c}"
+           ".tag{display:inline-block;font:12px monospace;background:#eee;border-radius:3px;padding:0 .4rem;margin-right:.3rem}"
+           ".sev-ERROR{color:#d33;font-weight:bold}.sev-WARNING{color:#b70}.sev-INFO{color:#09c}"
+           ".msg{margin-top:.3rem;color:#333}")
+    parts = [f"<!doctype html><meta charset=utf-8><title>Binary triage report</title><style>{css}</style>",
+             "<h1>Binary triage report</h1>"]
+    for name, role, fs, c in rows:
+        parts.append(f"<h2>{html.escape(name)} <small>({role}) — {c['ERROR']} error · {c['WARNING']} warning · {c['INFO']} info</small></h2>")
+        if not fs:
+            parts.append("<p><em>no notable static findings — reverse it (Ghidra/radare2)</em></p>")
+        for f in fs:
+            parts.append(
+                f"<div class='f {f['severity']}'>"
+                f"<span class='sev-{f['severity']}'>{f['severity']}</span> "
+                f"<span class='tag'>{html.escape(f['impact'])}</span>"
+                f"<span class='tag'>{html.escape(f['id'])}</span>"
+                f"<span class='tag'>{html.escape(f['where'])}</span>"
+                f"<span class='tag'>conf {f['confidence']}</span>"
+                f"<div class='msg'>{html.escape(f['message'])}</div></div>")
+    return "\n".join(parts)
 
 
 if __name__ == "__main__":

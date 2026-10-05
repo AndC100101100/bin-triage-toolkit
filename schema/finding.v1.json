@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AndC100101100/bin-triage-toolkit/schema/finding.v1.json",
+  "title": "A&D finding (v1)",
+  "description": "Shared finding contract for the Costa Rica ECSC A&D tooling. A downstream consumer (patch dashboard, merge step) can rely on these fields. bin-triage emits this today; a source-level tool (Opengrep, Task 10) can populate the same fields with source:'opengrep'.",
+  "type": "object",
+  "required": ["schema_version", "source", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "source": {"type": "string", "description": "producing tool, e.g. bin-triage or opengrep"},
+    "generated_at": {"type": "string", "description": "ISO-8601 timestamp (optional)"},
+    "findings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/finding"}
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "required": ["source", "binary", "finding_class", "location",
+                   "severity", "confidence", "evidence", "triage_status", "rule_id"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {"type": "string", "enum": ["bin-triage", "opengrep"]},
+        "service": {"type": ["string", "null"], "description": "service-tree name, if known"},
+        "binary": {"type": "string", "description": "binary or source file the finding is in"},
+        "finding_class": {
+          "type": "string",
+          "description": "normalized category shared across tools",
+          "enum": ["buffer-overflow", "format-string", "command-exec", "win-target",
+                   "heap-misuse", "weak-mitigation", "network-facing", "triage-note", "other"]
+        },
+        "rule_id": {"type": "string", "description": "stable, specific rule id (e.g. unbounded-input-gets)"},
+        "location": {"type": "string", "description": "function, or file:line for source findings"},
+        "severity": {"type": "string", "enum": ["ERROR", "WARNING", "INFO"]},
+        "impact": {
+          "type": "string",
+          "enum": ["rce", "flag-leak", "auth-bypass", "memory-corruption", "integrity", "dos", "info"]
+        },
+        "confidence": {"type": "string", "enum": ["low", "med", "high"]},
+        "evidence": {"type": "string", "description": "short why-it-matters / what was observed"},
+        "triage_status": {"type": "string", "enum": ["scored", "needs-manual"]},
+        "message": {"type": "string", "description": "optional longer offense+patch direction"}
+      }
+    }
+  }
+}

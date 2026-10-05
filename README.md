@@ -1,5 +1,7 @@
 # Binary Triage Toolkit
 
+[![CI](https://github.com/AndC100101100/bin-triage-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/AndC100101100/bin-triage-toolkit/actions/workflows/ci.yml)
+
 Fast, static, offline first-pass triage of ELF binaries. It tells you *what a binary is, what's
 notable about it, and where to start* — then hands off to Ghidra/pwntools/radare2 for the actual
 deep work. Built for Attack & Defense (ECSC/FAUST) and CTF pwn/rev, with a malware/forensic mode.
@@ -69,15 +71,23 @@ Go `.gopclntab`). Orientation only — the RE happens in the tools it points you
 binary-triage rev ./challenges/ --profile ad --recursive
 ```
 
-### `diff` — binary diff (defense / opponent analysis)
+### `diff` — patch guard (defense)
 
 ```bash
-binary-triage diff <pristine> <other> [-f table|json]
+binary-triage diff <pristine> <patched> [-f table|json] \
+    [--allow <fn> ...] [--allow-file allow.txt] [--timeout 3]
 ```
 
-Section, symbol, byte-range and changed-function diff between two ELFs. Use it to confirm an
-in-place patch changed only what you intended, or to spot which function an opponent patched
-(= the bug they found).
+After you patch your own service in place, diff the pristine build against the patched one to
+confirm the change touched **only** the function(s) you intended (so you don't break what the
+checker exercises). Function bodies are compared at normalized-disassembly level, so a plain
+recompile of unchanged source shows no changes — relocation noise (addresses, relative call
+targets, RIP-relative displacements) is masked out. With `--allow`/`--allow-file` it becomes a
+gate for deploy scripts: exit `0` if the only changed functions are allowlisted, exit `2`
+otherwise.
+
+(In ECSC you don't receive opponents' binaries — only captured traffic — so this is a self-check
+on your own box, not an opponent-diffing tool.)
 
 ### `analyze` / `batch` — malware / forensic mode
 

@@ -10,6 +10,13 @@ click>=8.1.0
 rich>=13.0.0
 
 # Binary RE / pwn engine (also our day-of exploit library)
+#
+# pwntools phones home to pypi.org once/week on first import to check for a newer
+# version. The toolkit disables this in-process (analyzers/_pwnguard.py), but if you
+# `from pwn import *` directly in exploit scripts, kill it on the vulnbox too, once
+# before play (prevents a surprise outbound HTTPS at tool start under screen record):
+#   mkdir -p ~/.config && printf '[update]\ninterval=never\n' >> ~/.config/pwn.conf
+#   # (or /etc/pwn.conf system-wide)
 pwntools>=4.11.0
 capstone>=5.0.0
 

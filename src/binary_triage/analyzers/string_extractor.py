@@ -95,7 +95,11 @@ class StringExtractor(BaseAnalyzer):
 
     # Attack & Defense relevant string patterns (service binaries, not malware)
     AD_PATTERNS = {
-        "flag_paths": re.compile(r'(?:/[\w./-]*)?flag[\w.]*', re.IGNORECASE),
+        # Genuine flag references only: a flag-like path component or a FLAG{...}
+        # token. Bare "flag"/"flags" (glibc printf-internal tables) are not matched.
+        "flag_paths": re.compile(
+            r'\.?(?:/[\w.\-]+)*/[\w.\-]*flag[\w.\-]*'
+            r'|\w*flag\w*\{[^}\n]{1,80}\}', re.IGNORECASE),
         "shell": re.compile(r'/bin/(?:sh|bash|dash)\b'),
         "format_specifiers": re.compile(r'%(?:\d+\$)?[ -+#0]*\d*(?:\.\d+)?[hljztL]*[diouxXeEfFgGaAcspn]'),
         "secrets": re.compile(r'(?i)(?:secret|token|passwd|password|api[_-]?key|private[_-]?key)[\w./=+-]*'),

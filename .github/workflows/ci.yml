@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system tools the AD path shells out to
+        run: sudo apt-get update && sudo apt-get install -y binutils checksec
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install (ad + dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[ad,dev]"
+
+      - name: Unit + CLI suite
+        run: pytest -q -m "not validation" tests
+
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system tools
+        run: sudo apt-get update && sudo apt-get install -y binutils checksec
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+      - name: Install (ad + dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[ad,dev]"
+      - name: Score-validation harness
+        env:
+          GOTELEMETRY: "off"
+        run: pytest -m validation -v tests
