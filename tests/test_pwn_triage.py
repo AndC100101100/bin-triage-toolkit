@@ -70,3 +70,64 @@ def test_bindiff_finds_changed_functions(weak, hard):
     assert r["identical"] is False
     # vuln/win exist in both but differ -> should be flagged as suspects
     assert "suspect_functions" in r
+
+
+# ---- Task 5: network-facing detection ----
+_NETSRC = (
+    '#include <sys/socket.h>\n#include <netinet/in.h>\n#include <unistd.h>\n'
+    'int main(){int s=socket(AF_INET,SOCK_STREAM,0);struct sockaddr_in a={0};'
+    'bind(s,(void*)&a,sizeof a);listen(s,1);int c=accept(s,0,0);'
+    'char b[64];recv(c,b,sizeof b,0);return 0;}\n'
+)
+_PLAINSRC = '#include <stdio.h>\nint main(){long n=0;for(int i=0;i<1000;i++)n+=i;printf("%ld\\n",n);return 0;}\n'
+
+
+def _build_src(tmp, name, src):
+    if not shutil.which("gcc"):
+        pytest.skip("gcc unavailable")
+    c = tmp / f"{name}.c"
+    c.write_text(src)
+    out = tmp / name
+    subprocess.run(["gcc", "-O1", "-w", str(c), "-o", str(out)], check=True)
+    return out
+
+
+def test_network_facing_server_flagged(tmp_path):
+    srv = _build_src(tmp_path, "srv", _NETSRC)
+    r = PwnTriage().analyze(srv).results
+    assert r["network_facing"] is True
+    assert {"listen", "accept"} & set(r["network_calls"])
+
+
+def test_compute_helper_not_network_facing(tmp_path):
+    plain = _build_src(tmp_path, "plain", _PLAINSRC)
+    r = PwnTriage().analyze(plain).results
+    assert r["network_facing"] is False
+    assert r["network_calls"] == []
+
+
+# ---- Task 6: fewer false positives in string / symbol signals ----
+def test_flag_path_rejects_glibc_noise():
+    from binary_triage.analyzers.pwn_triage import STRING_PATTERNS
+    pat = STRING_PATTERNS["flag_path"]
+    # glibc printf-internal words must NOT match
+    for noise in (b"flag", b"flags", b"FLAGS_1.", b"conv_flags"):
+        assert not pat.fullmatch(noise), noise
+    # genuine references MUST match
+    assert pat.search(b"/srv/flag")
+    assert pat.search(b"./flag.txt")
+    assert pat.search(b"flag{abc123}")
+    assert pat.search(b"FLAG{x}")
+
+
+def test_win_symbol_is_a_weak_score_driver():
+    """A win-*named* symbol alone must contribute the downweighted value (8),
+    not dominate like a confirmed bug would (pins Task 6's reweight)."""
+    pt = PwnTriage()
+    base, _ = pt._score({}, [], [], [], {}, False, False)
+    named, drivers = pt._score({}, [], ["process_login"], [], {}, False, False)
+    assert named - base == 8, (base, named)
+    assert any("weak signal" in d for d in drivers)
+    # a behavioral win target (actually calls system) stays full weight
+    beh, _ = pt._score({}, [], [], [{"func": "f", "callee": "system"}], {}, False, False)
+    assert beh - base == 20
