@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Set
 logger = logging.getLogger(__name__)
 
 try:
+    from . import _pwnguard  # noqa: F401  (disables pwntools' PyPI update check; must precede `from pwn`)
     from pwn import ELF, context as _pwn_context
     _pwn_context.log_level = "error"
     logging.getLogger("pwnlib").setLevel(logging.ERROR)
@@ -301,3 +302,30 @@ def user_functions(syms: Dict[str, Set[str]]) -> List[str]:
     """Program-defined functions with libc/runtime noise filtered out."""
     funcs = syms.get("functions") or syms.get("defined") or set()
     return sorted(f for f in funcs if not LIBC_NOISE_RE.match(f))
+
+
+# --------------------------------------------------------------------------- #
+# ret2win / ret2system ingredients (still facts: call-sites, gadgets, strings)
+# --------------------------------------------------------------------------- #
+_FUNC_LABEL = re.compile(r"^[0-9a-fA-F]+ <([^>]+)>:")
+_CALL_LINE = re.compile(r"^\s*([0-9a-fA-F]+):.*\b(?:call|callq|bl|blx)\b.*<([^>+@]+)")
+
+
+def call_sites(path: Path, callees: Set[str]) -> List[Dict[str, str]]:
+    """objdump-based: which defined function calls one of `callees` (e.g. system).
+    Returns [{func, callee, site}]. func is '?' inside a stripped .text region."""
+    try:
+        dis = subprocess.run(["objdump", "-d", str(path)],
+                             capture_output=True, text=True, timeout=60).stdout
+    except Exception:
+        return []
+    out, cur = [], "?"
+    for line in dis.splitlines():
+        m = _FUNC_LABEL.match(line)
+        if m:
+            cur = m.group(1)
+            continue
+        c = _CALL_LINE.match(line)
+        if c and c.group(2) in callees:
+            out.append({"func": cur, "callee": c.group(2), "site": "0x" + c.group(1)})
+    return out
